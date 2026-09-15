@@ -17,6 +17,7 @@
 #include "il2cpp-tabledefs.h"
 #include "il2cpp-class.h"
 #include <sys/mman.h>
+#include <fcntl.h>
 
 #define DO_API(r, n, p) r (*n) p
 
@@ -680,7 +681,7 @@ void dump_lua_key3(const char *outDir) {
 // ================== end PATCH v3 ==================
 
 // ==================== PATCH v4 : hook CustomerLoader ====================
-static std::string g_luaOutDir;
+static char g_luaOutDir[1024] = {0};   // no global ctor (global std::string crashed the app)
 static Il2CppArray *(*g_origLoader)(Il2CppString **refPath) = nullptr;
 
 static std::string safe_name(const std::string &s) {
@@ -709,7 +710,7 @@ static void write_blob(const std::string &path, const void *data, size_t len) {
 }
 
 static void dump_script(const char *tag, Il2CppString **refPath, Il2CppArray *arr) {
-    if (g_luaOutDir.empty()) {
+    if (g_luaOutDir[0] == 0) {
         return;
     }
     std::string name = "unknown";
@@ -726,7 +727,7 @@ static void dump_script(const char *tag, Il2CppString **refPath, Il2CppArray *ar
         len = il2cpp_array_length(arr);
     }
     if (len > 0 && len < 16u * 1024u * 1024u) {
-        std::string path = g_luaOutDir + "/lua_" + safe;
+        std::string path = std::string(g_luaOutDir) + "/lua_" + safe;
         write_blob(path, arr->vector, len);
         LOGI("lua dump [%s] %s (%u bytes)", tag, safe.c_str(), len);
     } else {
@@ -775,8 +776,8 @@ void install_lua_hook() {
 }
 
 void dump_lua_scripts(const char *outDir) {
-    g_luaOutDir = std::string(outDir) + "/files";
-    LOGI("lua scripts dir %s", g_luaOutDir.c_str());
+    snprintf(g_luaOutDir, sizeof(g_luaOutDir), "%s/files", outDir);
+    LOGI("lua scripts dir %s", g_luaOutDir);
     if (!g_origLoader || !il2cpp_string_new) {
         LOGI("lua samples: no loader");
         return;
@@ -892,6 +893,137 @@ void dump_lua_scan(const char *outDir) {
 }
 // ================== end PATCH v6 ==================
 
+// ==================== PATCH v7 : SAFE scan via /proc/self/mem ====================
+static bool safe_read_mem(int fd, void *dst, unsigned long src, size_t len) {
+    if (fd < 0 || len == 0) {
+        return false;
+    }
+    ssize_t r = pread(fd, dst, len, (off_t) src);
+    return r == (ssize_t) len;
+}
+
+static void scan_name_safe(const char *outDir, const std::string &name, int round) {
+    std::string nA = name;
+    std::string nW;
+    for (size_t i = 0; i < name.size(); ++i) {
+        nW += name[i];
+        nW += (char) 0;
+    }
+    int memfd = open("/proc/self/mem", O_RDONLY);
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (!maps) {
+        if (memfd >= 0) close(memfd);
+        return;
+    }
+    if (memfd < 0) {
+        LOGI("scan7: cannot open /proc/self/mem");
+        fclose(maps);
+        return;
+    }
+    const size_t CH = 65536;
+    std::vector<unsigned char> buf(CH);
+    char line[512];
+    int hits = 0;
+    while (fgets(line, sizeof(line), maps) && hits < 2) {
+        unsigned long start = 0, end = 0;
+        char perms[8] = {0};
+        if (sscanf(line, "%lx-%lx %7s", &start, &end, perms) != 3) {
+            continue;
+        }
+        if (perms[0] != 'r' || strchr(line, '/') != nullptr) {
+            continue;
+        }
+        if (end <= start) {
+            continue;
+        }
+        unsigned long len = end - start;
+        if (len < 4096 || len > (256UL << 20)) {
+            continue;
+        }
+        for (unsigned long off = 0; off + nA.size() < len; off += (CH - 512)) {
+            size_t want = CH;
+            if (off + want > len) {
+                want = (size_t) (len - off);
+            }
+            if (want < nA.size()) {
+                break;
+            }
+            if (!safe_read_mem(memfd, buf.data(), start + off, want)) {
+                continue;
+            }
+            for (size_t i = 0; i + nA.size() <= want; ++i) {
+                bool hit = memcmp(buf.data() + i, nA.data(), nA.size()) == 0;
+                if (!hit && i + nW.size() <= want) {
+                    hit = memcmp(buf.data() + i, nW.data(), nW.size()) == 0;
+                }
+                if (!hit) {
+                    continue;
+                }
+                const size_t CARVE = 131072;
+                unsigned long abs = start + off + i;
+                unsigned long base = (abs - start > CARVE / 2) ? (abs - CARVE / 2) : start;
+                size_t cl = CARVE;
+                if (base + cl > end) {
+                    cl = (size_t) (end - base);
+                }
+                std::vector<unsigned char> carve(cl);
+                if (safe_read_mem(memfd, carve.data(), base, cl)) {
+                    std::string path = std::string(outDir) + "/files/scan_" + safe_name(name) +
+                                       "_r" + std::to_string(round) + "_" + std::to_string(hits) + ".bin";
+                    write_blob(path, carve.data(), cl);
+                    LOGI("scan7 hit %s r%d @%lx -> %s", name.c_str(), round, abs, path.c_str());
+                }
+                hits++;
+                break;
+            }
+            if (hits >= 2) {
+                break;
+            }
+        }
+    }
+    fclose(maps);
+    close(memfd);
+}
+
+void dump_lua_scan7(const char *outDir) {
+    std::vector<std::string> names;
+    const char *builtin[] = {"TileMatchMainDialog", "TileMatchModel", "TileMatchDefine",
+                             "ActivityModule", "AceUtils", "LevelGift", "PlayerLevelDialog",
+                             "RingLinkLevelGenerator", "ActivityChessboardMgr", "AP7SignModel",
+                             "ALiPayMiniProgramModel", "GardenLevelNode", "TileMatchColorVo",
+                             "TileMatchParamVo", "TileMatchFinishPopup", "TileMatchGuideBookDialog"};
+    for (size_t i = 0; i < sizeof(builtin) / sizeof(builtin[0]); ++i) {
+        names.push_back(builtin[i]);
+    }
+    {
+        std::string lp = std::string(outDir) + "/files/lua_names.txt";
+        std::ifstream in(lp);
+        std::string ln;
+        while (std::getline(in, ln)) {
+            if (!ln.empty() && ln[ln.size() - 1] == '\r') {
+                ln.erase(ln.size() - 1);
+            }
+            if (ln.size() > 2) {
+                names.push_back(ln);
+            }
+        }
+    }
+    LOGI("scan7: %zu names", names.size());
+    for (int round = 0; round < 3; ++round) {
+        sleep(round == 0 ? 20 : 15);
+        for (size_t i = 0; i < names.size(); ++i) {
+            scan_name_safe(outDir, names[i], round);
+        }
+        std::string st = std::string(outDir) + "/files/lua_scan_status.txt";
+        std::ofstream stf(st, std::ios::app);
+        stf << "v7 round " << round << " done, names " << names.size() << "\n";
+        stf.close();
+    }
+    LOGI("scan7 done");
+}
+// ================== end PATCH v7 ==================
+
+
 
 
 
@@ -1000,6 +1132,6 @@ void il2cpp_dump(const char *outDir) {
         outStream << outPuts[i];
     }
     outStream.close();
-    dump_lua_scan(outDir);
+    dump_lua_scan7(outDir);
     LOGI("dump done!");
 }
