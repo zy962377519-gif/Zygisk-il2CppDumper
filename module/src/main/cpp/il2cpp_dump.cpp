@@ -798,6 +798,101 @@ void dump_lua_scripts(const char *outDir) {
 }
 // ================== end PATCH v4 ==================
 
+// ==================== PATCH v6 : read-only memory scan ====================
+static void scan_for_name(const char *outDir, const std::string &name, int round) {
+    std::string needleA = name;
+    std::string needleW;
+    for (size_t i = 0; i < name.size(); ++i) {
+        needleW += name[i];
+        needleW += (char) 0;
+    }
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (!maps) {
+        return;
+    }
+    char line[512];
+    int hits = 0;
+    while (fgets(line, sizeof(line), maps) && hits < 2) {
+        unsigned long start = 0, end = 0;
+        char perms[8] = {0};
+        if (sscanf(line, "%lx-%lx %7s", &start, &end, perms) != 3) {
+            continue;
+        }
+        if (perms[0] != 'r') {
+            continue;
+        }
+        if (strchr(line, '/') != nullptr) {
+            continue;
+        }
+        if (end <= start) {
+            continue;
+        }
+        unsigned long len = end - start;
+        if (len > (384UL << 20)) {
+            continue;
+        }
+        for (unsigned long off = 0; off + needleA.size() < len; off += 8) {
+            void *p = (void *) (start + off);
+            if (memcmp(p, needleA.data(), needleA.size()) == 0 ||
+                memcmp(p, needleW.data(), needleW.size()) == 0) {
+                unsigned long from = (off > 65536) ? off - 65536 : 0;
+                unsigned long to = off + 65536;
+                if (to > len) {
+                    to = len;
+                }
+                std::string path = std::string(outDir) + "/files/scan_" + safe_name(name) +
+                                   "_r" + std::to_string(round) + "_" + std::to_string(hits) + ".bin";
+                write_blob(path, (void *) (start + from), (size_t) (to - from));
+                LOGI("scan hit %s r%d @%lx", name.c_str(), round, (start + off));
+                hits++;
+                if (hits >= 2) {
+                    break;
+                }
+            }
+        }
+    }
+    fclose(maps);
+}
+
+void dump_lua_scan(const char *outDir) {
+    std::vector<std::string> names;
+    const char *builtin[] = {"TileMatchMainDialog", "TileMatchModel", "TileMatchDefine",
+                             "ActivityModule", "AceUtils", "LevelGift", "PlayerLevelDialog",
+                             "RingLinkLevelGenerator", "ActivityChessboardMgr", "AP7SignModel",
+                             "ALiPayMiniProgramModel", "GardenLevelNode", "TileMatchColorVo",
+                             "TileMatchParamVo", "TileMatchFinishPopup", "TileMatchGuideBookDialog"};
+    for (size_t i = 0; i < sizeof(builtin) / sizeof(builtin[0]); ++i) {
+        names.push_back(builtin[i]);
+    }
+    {
+        std::string lp = std::string(outDir) + "/files/lua_names.txt";
+        std::ifstream in(lp);
+        std::string ln;
+        while (std::getline(in, ln)) {
+            if (!ln.empty() && ln[ln.size() - 1] == '\r') {
+                ln.erase(ln.size() - 1);
+            }
+            if (ln.size() > 2) {
+                names.push_back(ln);
+            }
+        }
+    }
+    LOGI("lua scan: %zu names", names.size());
+    for (int round = 0; round < 3; ++round) {
+        sleep(round == 0 ? 20 : 15);
+        for (size_t i = 0; i < names.size(); ++i) {
+            scan_for_name(outDir, names[i], round);
+        }
+        std::string st = std::string(outDir) + "/files/lua_scan_status.txt";
+        std::ofstream stf(st, std::ios::app);
+        stf << "round " << round << " done, names " << names.size() << "\n";
+        stf.close();
+    }
+    LOGI("lua scan done");
+}
+// ================== end PATCH v6 ==================
+
+
 
 
 
@@ -820,7 +915,7 @@ void il2cpp_api_init(void *handle) {
     }
     auto domain = il2cpp_domain_get();
     il2cpp_thread_attach(domain);
-    install_lua_hook();
+    // install_lua_hook();  // disabled: pointer patch made the game crash
 }
 
 void il2cpp_dump(const char *outDir) {
@@ -905,6 +1000,6 @@ void il2cpp_dump(const char *outDir) {
         outStream << outPuts[i];
     }
     outStream.close();
-    dump_lua_scripts(outDir);
+    dump_lua_scan(outDir);
     LOGI("dump done!");
 }
