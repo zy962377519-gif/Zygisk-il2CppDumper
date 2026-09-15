@@ -419,6 +419,176 @@ void dump_lua_key(const char *outDir) {
 }
 // ================== end PATCH ==================
 
+// ==================== PATCH v2 ====================
+static Il2CppClass *find_class_any(const char *ns, const char *name) {
+    if (!il2cpp_domain_get_assemblies || !il2cpp_assembly_get_image ||
+        !il2cpp_image_get_class_count || !il2cpp_image_get_class) {
+        return nullptr;
+    }
+    size_t count = 0;
+    auto domain = il2cpp_domain_get();
+    auto assemblies = il2cpp_domain_get_assemblies(domain, &count);
+    if (!assemblies) {
+        return nullptr;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        auto image = il2cpp_assembly_get_image(assemblies[i]);
+        if (!image) {
+            continue;
+        }
+        auto n = il2cpp_image_get_class_count(image);
+        for (size_t j = 0; j < n; ++j) {
+            auto k = const_cast<Il2CppClass *>(il2cpp_image_get_class(image, j));
+            if (!k || !il2cpp_class_get_name) {
+                continue;
+            }
+            auto cn = il2cpp_class_get_name(k);
+            if (!cn || strcmp(cn, name) != 0) {
+                continue;
+            }
+            if (ns && ns[0] && il2cpp_class_get_namespace) {
+                auto kns = il2cpp_class_get_namespace(k);
+                if (!kns || strcmp(kns, ns) != 0) {
+                    continue;
+                }
+            }
+            return k;
+        }
+    }
+    return nullptr;
+}
+
+static std::string hex_of(const void *data, int len) {
+    static const char *h = "0123456789abcdef";
+    std::string s;
+    auto *p = (const unsigned char *) data;
+    for (int i = 0; i < len; ++i) {
+        s += h[p[i] >> 4];
+        s += h[p[i] & 0xF];
+    }
+    return s;
+}
+
+static std::string call_method_string(const MethodInfo *m, void *obj) {
+    if (!m || !il2cpp_runtime_invoke || !il2cpp_string_chars || !il2cpp_string_length) {
+        return std::string();
+    }
+    Il2CppException *exc = nullptr;
+    Il2CppObject *res = il2cpp_runtime_invoke(m, obj, nullptr, &exc);
+    if (exc || !res) {
+        return std::string();
+    }
+    auto *s = (Il2CppString *) res;
+    return u16_to_utf8(il2cpp_string_chars(s), il2cpp_string_length(s));
+}
+
+static std::string call_method_bytes(const MethodInfo *m, void *obj) {
+    if (!m || !il2cpp_runtime_invoke || !il2cpp_array_length) {
+        return std::string();
+    }
+    Il2CppException *exc = nullptr;
+    Il2CppObject *res = il2cpp_runtime_invoke(m, obj, nullptr, &exc);
+    if (exc || !res) {
+        return std::string();
+    }
+    auto *arr = (Il2CppArray *) res;
+    uint32_t len = il2cpp_array_length(arr);
+    if (len == 0 || len > 64) {
+        return std::string();
+    }
+    return hex_of(arr->vector, (int) len);
+}
+
+void dump_lua_key2(const char *outDir) {
+    std::stringstream log;
+    log << "==== lua key dump v2 ====\n";
+    auto domain = il2cpp_domain_get ? il2cpp_domain_get() : nullptr;
+    if (domain && il2cpp_thread_attach) {
+        il2cpp_thread_attach(domain);
+    }
+    if (!domain) {
+        log << "no il2cpp domain\n";
+    } else {
+        Il2CppClass *klass = find_class_any("Engine.Modules", "LuaModule");
+        if (!klass) {
+            klass = find_class_any("", "LuaModule");
+        }
+        if (!klass) {
+            klass = find_class_any(nullptr, "LuaModule");
+        }
+        if (!klass) {
+            log << "LuaModule not found in any image\n";
+        } else {
+            log << "LuaModule = " << (void *) klass;
+            if (il2cpp_class_get_namespace) {
+                log << "  ns=[" << il2cpp_class_get_namespace(klass) << "]";
+            }
+            log << "\n-- fields --\n";
+            if (il2cpp_class_get_fields && il2cpp_field_get_name) {
+                void *iter = nullptr;
+                while (auto f = il2cpp_class_get_fields(klass, &iter)) {
+                    log << "  " << il2cpp_field_get_name(f) << "\n";
+                }
+            }
+            log << "-- methods --\n";
+            if (il2cpp_class_get_methods && il2cpp_method_get_name) {
+                void *iter = nullptr;
+                while (auto m = il2cpp_class_get_methods(klass, &iter)) {
+                    log << "  " << il2cpp_method_get_name(m) << "  RVA 0x" << std::hex
+                        << (m->methodPointer ? ((uint64_t) m->methodPointer - il2cpp_base) : 0)
+                        << std::dec << "\n";
+                }
+            }
+            const MethodInfo *getter = nullptr;
+            if (il2cpp_class_get_property_from_name && il2cpp_property_get_get_method) {
+                const PropertyInfo *prop = il2cpp_class_get_property_from_name(klass, "AesPassword");
+                if (prop) {
+                    getter = il2cpp_property_get_get_method((PropertyInfo *) prop);
+                }
+            }
+            if (!getter && il2cpp_class_get_method_from_name) {
+                getter = il2cpp_class_get_method_from_name(klass, "get_AesPassword", 0);
+            }
+            std::string key;
+            for (int i = 0; i < 10 && key.empty(); ++i) {
+                if (i > 0) {
+                    sleep(5);
+                }
+                key = call_method_string(getter, nullptr);
+                LOGI("lua key v2 try %d -> %zu", i, key.size());
+            }
+            log << "AesPassword = [" << key << "]\n";
+            if (il2cpp_class_get_field_from_name && il2cpp_field_static_get_value &&
+                il2cpp_object_get_class && il2cpp_class_get_method_from_name) {
+                auto field = il2cpp_class_get_field_from_name(klass, "_aesManaged");
+                if (field) {
+                    Il2CppObject *aesObj = nullptr;
+                    il2cpp_field_static_get_value(field, &aesObj);
+                    log << "aesObj = " << (void *) aesObj << "\n";
+                    if (aesObj) {
+                        auto aesClass = il2cpp_object_get_class(aesObj);
+                        if (aesClass) {
+                            auto mKey = il2cpp_class_get_method_from_name(aesClass, "get_Key", 0);
+                            auto mIv = il2cpp_class_get_method_from_name(aesClass, "get_IV", 0);
+                            log << "AES.Key = " << call_method_bytes(mKey, aesObj) << "\n";
+                            log << "AES.IV  = " << call_method_bytes(mIv, aesObj) << "\n";
+                        }
+                    }
+                } else {
+                    log << "_aesManaged field not found\n";
+                }
+            }
+        }
+    }
+    std::string path = std::string(outDir) + "/files/lua_key.txt";
+    std::ofstream out(path, std::ios::binary);
+    out << log.str();
+    out.close();
+    LOGI("lua key v2 -> %s", path.c_str());
+}
+// ================== end PATCH v2 ==================
+
+
 void il2cpp_api_init(void *handle) {
     LOGI("il2cpp_handle: %p", handle);
     init_il2cpp_api(handle);
@@ -522,6 +692,6 @@ void il2cpp_dump(const char *outDir) {
         outStream << outPuts[i];
     }
     outStream.close();
-    dump_lua_key(outDir);
+    dump_lua_key2(outDir);
     LOGI("dump done!");
 }
