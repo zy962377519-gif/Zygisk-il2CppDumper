@@ -322,6 +322,103 @@ std::string dump_type(const Il2CppType *type) {
     return outPut.str();
 }
 
+// ==================== PATCH: dump Lua AES key ====================
+static std::string u16_to_utf8(const Il2CppChar *chars, int32_t len) {
+    std::string out;
+    for (int32_t i = 0; i < len; ++i) {
+        uint32_t c = (uint32_t) chars[i];
+        if (c < 0x80) {
+            out += (char) c;
+        } else if (c < 0x800) {
+            out += (char) (0xC0 | (c >> 6));
+            out += (char) (0x80 | (c & 0x3F));
+        } else {
+            out += (char) (0xE0 | (c >> 12));
+            out += (char) (0x80 | ((c >> 6) & 0x3F));
+            out += (char) (0x80 | (c & 0x3F));
+        }
+    }
+    return out;
+}
+
+static std::string call_string_getter(const MethodInfo *m) {
+    if (!m || !il2cpp_runtime_invoke || !il2cpp_string_chars || !il2cpp_string_length) {
+        return std::string();
+    }
+    Il2CppException *exc = nullptr;
+    Il2CppObject *res = il2cpp_runtime_invoke(m, nullptr, nullptr, &exc);
+    if (exc || !res) {
+        return std::string();
+    }
+    auto *s = (Il2CppString *) res;
+    return u16_to_utf8(il2cpp_string_chars(s), il2cpp_string_length(s));
+}
+
+void dump_lua_key(const char *outDir) {
+    std::stringstream log;
+    log << "==== lua key dump ====\n";
+    auto domain = il2cpp_domain_get ? il2cpp_domain_get() : nullptr;
+    if (domain && il2cpp_thread_attach) {
+        il2cpp_thread_attach(domain);
+    }
+    if (domain && il2cpp_domain_assembly_open && il2cpp_assembly_get_image && il2cpp_class_from_name) {
+        const Il2CppAssembly *asmCSharp = il2cpp_domain_assembly_open(domain, "Assembly-CSharp.dll");
+        Il2CppClass *klass = nullptr;
+        if (asmCSharp) {
+            auto image = il2cpp_assembly_get_image(asmCSharp);
+            klass = il2cpp_class_from_name(image, "", "LuaModule");
+            if (!klass) {
+                klass = il2cpp_class_from_name(image, "XLua", "LuaModule");
+            }
+        }
+        if (!klass) {
+            log << "LuaModule not found\n";
+        } else {
+            log << "LuaModule = " << (void *) klass << "\n";
+            const char *methNames[] = {"get_AesPassword", "CustomerLoader", "DoString",
+                                       "ExecuteScript", "Import", "DoImportScript"};
+            for (auto name : methNames) {
+                const MethodInfo *m = il2cpp_class_get_method_from_name
+                                      ? il2cpp_class_get_method_from_name(klass, name, -1) : nullptr;
+                log << name << " -> ";
+                if (m && m->methodPointer) {
+                    log << "RVA 0x" << std::hex << ((uint64_t) m->methodPointer - il2cpp_base)
+                        << std::dec << "\n";
+                } else {
+                    log << "not found\n";
+                }
+            }
+            const MethodInfo *getter = nullptr;
+            if (il2cpp_class_get_property_from_name && il2cpp_property_get_get_method) {
+                const PropertyInfo *prop = il2cpp_class_get_property_from_name(klass, "AesPassword");
+                if (prop) {
+                    getter = il2cpp_property_get_get_method((PropertyInfo *) prop);
+                }
+            }
+            if (!getter && il2cpp_class_get_method_from_name) {
+                getter = il2cpp_class_get_method_from_name(klass, "get_AesPassword", 0);
+            }
+            std::string key;
+            for (int i = 0; i < 8 && key.empty(); ++i) {
+                if (i > 0) {
+                    sleep(5);
+                }
+                key = call_string_getter(getter);
+                LOGI("lua key try %d -> %zu bytes", i, key.size());
+            }
+            log << "AesPassword = [" << key << "]\n";
+        }
+    } else {
+        log << "required il2cpp api missing\n";
+    }
+    std::string path = std::string(outDir) + "/files/lua_key.txt";
+    std::ofstream out(path, std::ios::binary);
+    out << log.str();
+    out.close();
+    LOGI("lua key -> %s", path.c_str());
+}
+// ================== end PATCH ==================
+
 void il2cpp_api_init(void *handle) {
     LOGI("il2cpp_handle: %p", handle);
     init_il2cpp_api(handle);
@@ -425,5 +522,6 @@ void il2cpp_dump(const char *outDir) {
         outStream << outPuts[i];
     }
     outStream.close();
+    dump_lua_key(outDir);
     LOGI("dump done!");
 }
