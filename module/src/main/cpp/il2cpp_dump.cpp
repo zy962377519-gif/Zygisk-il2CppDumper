@@ -588,6 +588,97 @@ void dump_lua_key2(const char *outDir) {
 }
 // ================== end PATCH v2 ==================
 
+// ==================== PATCH v3 ====================
+static int call_method_int(const MethodInfo *m, void *obj) {
+    if (!m || !il2cpp_runtime_invoke || !il2cpp_object_unbox) {
+        return -999;
+    }
+    Il2CppException *exc = nullptr;
+    Il2CppObject *res = il2cpp_runtime_invoke(m, obj, nullptr, &exc);
+    if (exc || !res) {
+        return -998;
+    }
+    void *p = il2cpp_object_unbox(res);
+    if (!p) {
+        return -997;
+    }
+    return *(int32_t *) p;
+}
+
+void dump_lua_key3(const char *outDir) {
+    std::string path = std::string(outDir) + "/files/lua_key.txt";
+    auto domain = il2cpp_domain_get ? il2cpp_domain_get() : nullptr;
+    if (domain && il2cpp_thread_attach) {
+        il2cpp_thread_attach(domain);
+    }
+    Il2CppClass *klass = find_class_any("Engine.Modules", "LuaModule");
+    if (!klass) {
+        klass = find_class_any(nullptr, "LuaModule");
+    }
+    const MethodInfo *getter = nullptr;
+    FieldInfo *aesField = nullptr;
+    if (klass) {
+        if (il2cpp_class_get_property_from_name && il2cpp_property_get_get_method) {
+            const PropertyInfo *prop = il2cpp_class_get_property_from_name(klass, "AesPassword");
+            if (prop) {
+                getter = il2cpp_property_get_get_method((PropertyInfo *) prop);
+            }
+        }
+        if (!getter && il2cpp_class_get_method_from_name) {
+            getter = il2cpp_class_get_method_from_name(klass, "get_AesPassword", 0);
+        }
+        if (il2cpp_class_get_field_from_name) {
+            aesField = il2cpp_class_get_field_from_name(klass, "_aesManaged");
+        }
+    }
+    for (int round = 0; round < 12; ++round) {
+        if (round > 0) {
+            sleep(10);
+        }
+        std::stringstream log;
+        log << "==== lua key v3  round " << round << "  (t=" << (round * 10) << "s) ====\n";
+        if (!klass) {
+            log << "LuaModule not found\n";
+        } else {
+            log << "AesPassword = [" << call_method_string(getter, nullptr) << "]\n";
+            if (aesField && il2cpp_field_static_get_value && il2cpp_object_get_class &&
+                il2cpp_class_get_method_from_name) {
+                Il2CppObject *aesObj = nullptr;
+                il2cpp_field_static_get_value(aesField, &aesObj);
+                log << "aesObj = " << (void *) aesObj << "\n";
+                if (aesObj) {
+                    auto aesClass = il2cpp_object_get_class(aesObj);
+                    log << "aesClass = " << (void *) aesClass << "\n";
+                    if (aesClass) {
+                        auto mKey = il2cpp_class_get_method_from_name(aesClass, "get_Key", 0);
+                        auto mIv = il2cpp_class_get_method_from_name(aesClass, "get_IV", 0);
+                        auto mMode = il2cpp_class_get_method_from_name(aesClass, "get_Mode", 0);
+                        auto mPad = il2cpp_class_get_method_from_name(aesClass, "get_Padding", 0);
+                        auto mFb = il2cpp_class_get_method_from_name(aesClass, "get_FeedbackSize", 0);
+                        auto mBlk = il2cpp_class_get_method_from_name(aesClass, "get_BlockSize", 0);
+                        auto mKS = il2cpp_class_get_method_from_name(aesClass, "get_KeySize", 0);
+                        log << "KeyHex = " << call_method_bytes(mKey, aesObj) << "\n";
+                        log << "IVHex  = " << call_method_bytes(mIv, aesObj) << "\n";
+                        log << "Mode = " << call_method_int(mMode, aesObj)
+                            << "  Padding = " << call_method_int(mPad, aesObj)
+                            << "  FeedbackSize = " << call_method_int(mFb, aesObj)
+                            << "  BlockSize = " << call_method_int(mBlk, aesObj)
+                            << "  KeySize = " << call_method_int(mKS, aesObj) << "\n";
+                    }
+                }
+            } else {
+                log << "aes field/API missing\n";
+            }
+        }
+        std::ofstream out(path, std::ios::binary);
+        out << log.str();
+        out.close();
+        LOGI("lua key v3 round %d written", round);
+    }
+}
+// ================== end PATCH v3 ==================
+
+
 
 void il2cpp_api_init(void *handle) {
     LOGI("il2cpp_handle: %p", handle);
@@ -692,6 +783,6 @@ void il2cpp_dump(const char *outDir) {
         outStream << outPuts[i];
     }
     outStream.close();
-    dump_lua_key2(outDir);
+    dump_lua_key3(outDir);
     LOGI("dump done!");
 }
