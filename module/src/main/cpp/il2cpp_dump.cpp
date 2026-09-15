@@ -16,6 +16,7 @@
 #include "log.h"
 #include "il2cpp-tabledefs.h"
 #include "il2cpp-class.h"
+#include <sys/mman.h>
 
 #define DO_API(r, n, p) r (*n) p
 
@@ -761,8 +762,16 @@ void install_lua_hook() {
         return;
     }
     g_origLoader = (Il2CppArray *(*)(Il2CppString **)) mi->methodPointer;
-    ((MethodInfo *) mi)->methodPointer = (Il2CppMethodPointer) hooked_CustomerLoader;
-    LOGI("lua hook: installed, orig = %p", g_origLoader);
+    uintptr_t addr = (uintptr_t) mi;
+    uintptr_t page = addr & ~(uintptr_t) 0xFFF;
+    int pr = mprotect((void *) page, 0x2000, 3);
+    LOGI("lua hook: mprotect(%p) = %d", (void *) page, pr);
+    if (pr == 0) {
+        ((MethodInfo *) mi)->methodPointer = (Il2CppMethodPointer) hooked_CustomerLoader;
+        LOGI("lua hook: pointer patched, orig = %p", g_origLoader);
+    } else {
+        LOGI("lua hook: patch skipped (page not writable), samples only");
+    }
 }
 
 void dump_lua_scripts(const char *outDir) {
