@@ -678,6 +678,118 @@ void dump_lua_key3(const char *outDir) {
 }
 // ================== end PATCH v3 ==================
 
+// ==================== PATCH v4 : hook CustomerLoader ====================
+static std::string g_luaOutDir;
+static Il2CppArray *(*g_origLoader)(Il2CppString **refPath) = nullptr;
+
+static std::string safe_name(const std::string &s) {
+    std::string r;
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '_' || c == '-' || c == '.') {
+            r += c;
+        } else {
+            r += '_';
+        }
+    }
+    if (r.empty()) {
+        r = "unknown";
+    }
+    return r;
+}
+
+static void write_blob(const std::string &path, const void *data, size_t len) {
+    std::ofstream f(path, std::ios::binary);
+    if (f) {
+        f.write((const char *) data, len);
+        f.close();
+    }
+}
+
+static void dump_script(const char *tag, Il2CppString **refPath, Il2CppArray *arr) {
+    if (g_luaOutDir.empty()) {
+        return;
+    }
+    std::string name = "unknown";
+    if (refPath && *refPath && il2cpp_string_chars && il2cpp_string_length) {
+        name = u16_to_utf8(il2cpp_string_chars(*refPath), il2cpp_string_length(*refPath));
+    }
+    std::string safe = safe_name(name);
+    bool hasLua = safe.size() > 4 && safe.substr(safe.size() - 4) == ".lua";
+    if (!hasLua) {
+        safe += ".lua";
+    }
+    uint32_t len = 0;
+    if (arr && il2cpp_array_length) {
+        len = il2cpp_array_length(arr);
+    }
+    if (len > 0 && len < 16u * 1024u * 1024u) {
+        std::string path = g_luaOutDir + "/lua_" + safe;
+        write_blob(path, arr->vector, len);
+        LOGI("lua dump [%s] %s (%u bytes)", tag, safe.c_str(), len);
+    } else {
+        LOGI("lua dump [%s] %s -> empty/null", tag, safe.c_str());
+    }
+}
+
+static Il2CppArray *hooked_CustomerLoader(Il2CppString **refPath) {
+    Il2CppArray *res = nullptr;
+    if (g_origLoader) {
+        res = g_origLoader(refPath);
+    }
+    dump_script("hook", refPath, res);
+    return res;
+}
+
+void install_lua_hook() {
+    if (!il2cpp_class_get_method_from_name || !il2cpp_class_get_method_from_name) {
+        LOGI("lua hook: api missing");
+        return;
+    }
+    Il2CppClass *klass = find_class_any("Engine.Modules", "LuaModule");
+    if (!klass) {
+        klass = find_class_any(nullptr, "LuaModule");
+    }
+    if (!klass) {
+        LOGI("lua hook: LuaModule not found");
+        return;
+    }
+    const MethodInfo *mi = il2cpp_class_get_method_from_name(klass, "CustomerLoader", 1);
+    if (!mi || !mi->methodPointer) {
+        LOGI("lua hook: CustomerLoader not found");
+        return;
+    }
+    g_origLoader = (Il2CppArray *(*)(Il2CppString **)) mi->methodPointer;
+    ((MethodInfo *) mi)->methodPointer = (Il2CppMethodPointer) hooked_CustomerLoader;
+    LOGI("lua hook: installed, orig = %p", g_origLoader);
+}
+
+void dump_lua_scripts(const char *outDir) {
+    g_luaOutDir = std::string(outDir) + "/files";
+    LOGI("lua scripts dir %s", g_luaOutDir.c_str());
+    if (!g_origLoader || !il2cpp_string_new) {
+        LOGI("lua samples: no loader");
+        return;
+    }
+    sleep(90);
+    const char *names[] = {"AceUtils", "TileMatchDefine", "TileMatchModel", "ActivityModule"};
+    const char *suffixes[] = {"", ".lua", ".lua.bytes"};
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            std::string full = std::string(names[i]) + suffixes[j];
+            Il2CppString *s = il2cpp_string_new(full.c_str());
+            Il2CppString *cur = s;
+            Il2CppArray *arr = g_origLoader(&cur);
+            dump_script(suffixes[j], &cur, arr);
+            sleep(1);
+        }
+    }
+    LOGI("lua samples done");
+}
+// ================== end PATCH v4 ==================
+
+
 
 
 void il2cpp_api_init(void *handle) {
@@ -699,6 +811,7 @@ void il2cpp_api_init(void *handle) {
     }
     auto domain = il2cpp_domain_get();
     il2cpp_thread_attach(domain);
+    install_lua_hook();
 }
 
 void il2cpp_dump(const char *outDir) {
@@ -783,6 +896,6 @@ void il2cpp_dump(const char *outDir) {
         outStream << outPuts[i];
     }
     outStream.close();
-    dump_lua_key3(outDir);
+    dump_lua_scripts(outDir);
     LOGI("dump done!");
 }
